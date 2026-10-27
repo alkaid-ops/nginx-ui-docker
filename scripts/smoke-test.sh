@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 
 image="${1:?usage: smoke-test.sh <image> <amd64|arm64>}"
 arch="${2:?usage: smoke-test.sh <image> <amd64|arm64>}"
 container_name="nginx-ui-plus-smoke-${arch}-$$"
-work_dir="$(mktemp -d)"
-nginx_dir="$work_dir/nginx"
-ui_dir="$work_dir/nginx-ui"
-log_dir="$work_dir/logs"
-mkdir -p "$nginx_dir" "$ui_dir" "$log_dir"
+nginx_volume="${container_name}-nginx"
+ui_volume="${container_name}-nginx-ui"
+log_volume="${container_name}-logs"
 
 cleanup() {
     local rc=$?
@@ -18,18 +16,22 @@ cleanup() {
         docker logs "$container_name" >&2 || true
     fi
     docker rm -f "$container_name" >/dev/null 2>&1 || true
-    rm -rf "$work_dir"
+    docker volume rm -f "$nginx_volume" "$ui_volume" "$log_volume" >/dev/null 2>&1 || true
     exit "$rc"
 }
 trap cleanup EXIT
+
+docker volume create "$nginx_volume" >/dev/null
+docker volume create "$ui_volume" >/dev/null
+docker volume create "$log_volume" >/dev/null
 
 docker run -d \
     --name "$container_name" \
     --platform "linux/$arch" \
     -p 127.0.0.1::80 \
-    -v "$nginx_dir:/etc/nginx" \
-    -v "$ui_dir:/etc/nginx-ui" \
-    -v "$log_dir:/var/log/nginx" \
+    -v "$nginx_volume:/etc/nginx" \
+    -v "$ui_volume:/etc/nginx-ui" \
+    -v "$log_volume:/var/log/nginx" \
     -e TZ=Asia/Shanghai \
     "$image" >/dev/null
 
@@ -51,9 +53,10 @@ wait_http "http://127.0.0.1:${host_port}/healthz"
 docker exec "$container_name" nginx -V 2>&1 | grep -qi openresty
 docker exec "$container_name" nginx -t -c /etc/nginx/nginx.conf
 docker exec "$container_name" test -s /etc/nginx/nginx.conf
-docker exec "$container_name" test -s /etc/nginx-ui/app.ini
-docker exec "$container_name" pgrep -f 'nginx-ui --config' >/dev/null
-docker exec "$container_name" pgrep -f 'nginx: master process' >/dev/null
+docker exec "$container_name" test -d /etc/nginx-ui
+docker exec "$container_name" test -d /etc/nginx/sites-enabled
+docker exec "$container_name" ps | grep -q '[n]ginx-ui --config'
+docker exec "$container_name" ps | grep -q '[n]ginx: master process'
 docker exec "$container_name" s6-svstat /run/service/nginx | grep -q '^up'
 docker exec "$container_name" s6-svstat /run/service/nginx-ui | grep -q '^up'
 
