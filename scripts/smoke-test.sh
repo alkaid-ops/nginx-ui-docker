@@ -14,6 +14,8 @@ cleanup() {
     if [ "$rc" -ne 0 ]; then
         echo "smoke test failed; container logs:" >&2
         docker logs "$container_name" >&2 || true
+        docker port "$container_name" >&2 || true
+        docker exec "$container_name" sh -c 'curl -fsS http://127.0.0.1/healthz 2>&1 || true; echo; curl -fsS http://127.0.0.1:9000/healthz 2>&1 || true; echo' >&2 || true
         docker exec "$container_name" sh -c 'cat /var/log/nginx/error.log 2>/dev/null || true' >&2 || true
     fi
     docker rm -f "$container_name" >/dev/null 2>&1 || true
@@ -36,8 +38,10 @@ docker run -d \
     -e TZ=Asia/Shanghai \
     "$image" >/dev/null
 
-host_port="$(docker port "$container_name" 80/tcp | awk -F: 'NR == 1 {print $NF}')"
-[ -n "$host_port" ] || { echo "could not determine published port" >&2; exit 1; }
+refresh_host_port() {
+    host_port="$(docker port "$container_name" 80/tcp | awk -F: 'NR == 1 {print $NF}')"
+    [ -n "$host_port" ] || { echo "could not determine published port" >&2; exit 1; }
+}
 
 wait_http() {
     local url="$1" attempts="${2:-90}" i
@@ -50,6 +54,7 @@ wait_http() {
     return 1
 }
 
+refresh_host_port
 wait_http "http://127.0.0.1:${host_port}/healthz"
 docker exec "$container_name" nginx -V 2>&1 | grep -qi openresty
 docker exec "$container_name" nginx -t -c /etc/nginx/nginx.conf
@@ -63,6 +68,7 @@ docker exec "$container_name" ps | grep -q '[n]ginx: master process'
 docker exec "$container_name" sh -c \
     'printf "\n# nginx-ui-plus smoke marker\n" >> /etc/nginx/conf.d/nginx-ui.conf'
 docker restart "$container_name" >/dev/null
+refresh_host_port
 wait_http "http://127.0.0.1:${host_port}/healthz"
 docker exec "$container_name" grep -q 'nginx-ui-plus smoke marker' /etc/nginx/conf.d/nginx-ui.conf
 
@@ -82,6 +88,7 @@ for ((i = 1; i <= 60; i++)); do
 done
 docker exec "$container_name" rm -f /etc/nginx/sites-enabled/zz-invalid-smoke.conf
 docker restart "$container_name" >/dev/null
+refresh_host_port
 wait_http "http://127.0.0.1:${host_port}/healthz"
 
 echo "smoke test passed for linux/$arch"
