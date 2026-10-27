@@ -6,6 +6,10 @@ output_dir="${2:?usage: build-from-source.sh <source-dir> <output-dir> <amd64-to
 amd64_toolchain="${3:?usage: build-from-source.sh <source-dir> <output-dir> <amd64-toolchain> <arm64-toolchain>}"
 arm64_toolchain="${4:?usage: build-from-source.sh <source-dir> <output-dir> <amd64-toolchain> <arm64-toolchain>}"
 
+source_dir="$(cd "$source_dir" && pwd)"
+mkdir -p "$output_dir"
+output_dir="$(cd "$output_dir" && pwd)"
+
 [ -f "$source_dir/go.mod" ] || { echo "source directory is not an Nginx UI checkout: $source_dir" >&2; exit 1; }
 [ -x "$amd64_toolchain/x86_64-linux-musl-gcc" ] || { echo "missing amd64 musl compiler in $amd64_toolchain" >&2; exit 1; }
 [ -x "$arm64_toolchain/aarch64-linux-musl-gcc" ] || { echo "missing arm64 musl compiler in $arm64_toolchain" >&2; exit 1; }
