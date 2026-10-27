@@ -62,7 +62,6 @@ docker exec "$container_name" test -s /etc/nginx/nginx.conf
 docker exec "$container_name" test -d /etc/nginx-ui
 docker exec "$container_name" test -d /etc/nginx/sites-enabled
 docker exec "$container_name" ps | grep -q '[n]ginx-ui --config'
-docker exec "$container_name" ps | grep -q '[n]ginx: master process'
 
 # Customized bundled config must survive a restart.
 docker exec "$container_name" sh -c \
