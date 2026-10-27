@@ -1,0 +1,17 @@
+services:
+  nginx-ui-plus:
+    image: ghcr.io/alkaid-ops/nginx-ui-plus:latest
+    container_name: nginx-ui-plus
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data/nginx:/etc/nginx
+      - ./data/nginx-ui:/etc/nginx-ui
+      - ./data/logs:/var/log/nginx
+      - ./data/www:/var/www
+      # Optional: enables Nginx UI to inspect and update its own container.
+      # - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:80"
+      - "8443:443"

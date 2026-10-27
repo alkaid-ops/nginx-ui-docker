@@ -1,0 +1,396 @@
+name: Build nginx-ui-plus
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "rootfs/**"
+      - "scripts/**"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "rootfs/**"
+      - "scripts/**"
+      - ".github/workflows/build.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream release tag; leave empty for the latest stable release"
+        required: false
+        type: string
+      build_mode:
+        description: "Where the nginx-ui binaries come from"
+        required: true
+        default: prebuilt
+        type: choice
+        options:
+          - prebuilt
+          - source
+      force:
+        description: "Rebuild even if the version tag already exists"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: nginx-ui-plus-publish
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/alkaid-ops/nginx-ui-plus
+  UPSTREAM_REPO: 0xJacky/nginx-ui
+  UPSTREAM_MINISIGN_PUBLIC_KEY: RWQyULqCZhSZ4LTBwQQlPCm5HS4qjbxPv75e56lU2y3cc9kviWsNqW4v
+  PLATFORMS: linux/amd64,linux/arm64
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go for actionlint
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache: false
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+      - name: Run actionlint and shellcheck
+        run: |
+          "$(go env GOPATH)/bin/actionlint"
+          shellcheck \
+            scripts/*.sh \
+            rootfs/etc/s6-overlay/s6-rc.d/init-config/init-config.sh \
+            rootfs/etc/s6-overlay/s6-rc.d/nginx/run \
+            rootfs/etc/s6-overlay/s6-rc.d/nginx-ui/run
+          bash -n scripts/*.sh
+
+      - name: Check Dockerfile
+        run: |
+          mkdir -p artifacts/amd64 artifacts/arm64
+          printf '#!/bin/sh\nexit 0\n' > artifacts/amd64/nginx-ui
+          printf '#!/bin/sh\nexit 0\n' > artifacts/arm64/nginx-ui
+          chmod +x artifacts/amd64/nginx-ui artifacts/arm64/nginx-ui
+          docker buildx build --check --build-arg OPENRESTY_IMAGE=openresty/openresty:1.31.1.1-5-alpine .
+
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      revision: ${{ steps.resolve.outputs.revision }}
+      build_mode: ${{ steps.resolve.outputs.build_mode }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      is_latest: ${{ steps.resolve.outputs.is_latest }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - name: Login to GHCR for tag inspection
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve upstream release
+        id: resolve
+        env:
+          REQUESTED_VERSION: ${{ github.event.inputs.version || '' }}
+          INPUT_BUILD_MODE: ${{ github.event.inputs.build_mode || 'prebuilt' }}
+          INPUT_FORCE: ${{ github.event.inputs.force || 'false' }}
+          WORKFLOW_EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$WORKFLOW_EVENT" == "schedule" || "$WORKFLOW_EVENT" == "workflow_dispatch" ]]; then
+            publish=true
+          else
+            publish=false
+          fi
+
+          build_mode="$INPUT_BUILD_MODE"
+          if [[ "$WORKFLOW_EVENT" != "workflow_dispatch" ]]; then
+            build_mode=prebuilt
+          fi
+
+          latest_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          version="$REQUESTED_VERSION"
+          if [[ -z "$version" ]]; then
+            version="$latest_tag"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid upstream release tag: $version" >&2
+            exit 1
+          fi
+
+          gh api "repos/${UPSTREAM_REPO}/releases/tags/${version}" >/dev/null
+          revision="$(gh api "repos/${UPSTREAM_REPO}/commits/${version}" --jq .sha)"
+          is_latest=false
+          if [[ "$version" == "$latest_tag" ]]; then
+            is_latest=true
+          fi
+
+          skip=false
+          if [[ "$publish" == "true" && "$INPUT_FORCE" != "true" && "$build_mode" == "prebuilt" ]]; then
+            if docker manifest inspect "${IMAGE}:${version}" >/dev/null 2>&1; then
+              skip=true
+            fi
+          fi
+
+          {
+            echo "version=$version"
+            echo "revision=$revision"
+            echo "build_mode=$build_mode"
+            echo "publish=$publish"
+            echo "is_latest=$is_latest"
+            echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### nginx-ui-plus build plan"
+            echo ""
+            echo "- Upstream version: \`$version\`"
+            echo "- Upstream revision: \`$revision\`"
+            echo "- Latest stable: \`$latest_tag\`"
+            echo "- Build mode: \`$build_mode\`"
+            echo "- Publish: \`$publish\`"
+            echo "- Skip existing version: \`$skip\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  assets:
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install release verification tools
+        if: needs.resolve.outputs.build_mode == 'prebuilt'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Fetch and verify upstream release assets
+        if: needs.resolve.outputs.build_mode == 'prebuilt'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: scripts/fetch-upstream.sh "$VERSION" artifacts
+
+      - name: Checkout upstream source
+        if: needs.resolve.outputs.build_mode == 'source'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if git clone --depth 1 --branch "$VERSION" "https://github.com/${UPSTREAM_REPO}.git" source; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+          test -f source/go.mod
+
+      - name: Set up Go
+        if: needs.resolve.outputs.build_mode == 'source'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: source/go.mod
+          cache: true
+          cache-dependency-path: source/go.sum
+
+      - name: Read Bun version
+        id: bun
+        if: needs.resolve.outputs.build_mode == 'source'
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("source/package.json"))["packageManager"].split("@")[-1])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Bun
+        if: needs.resolve.outputs.build_mode == 'source'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun.outputs.version }}
+
+      - name: Install amd64 musl toolchain
+        id: musl_amd64
+        if: needs.resolve.outputs.build_mode == 'source'
+        uses: nginxui/musl-cross-compilers@57f4de0b40cd0b53b1dc02fb8b317d87f78f3483
+        with:
+          target: x86_64-linux-musl
+          variant: richfelker/musl-cross-make
+
+      - name: Install arm64 musl toolchain
+        id: musl_arm64
+        if: needs.resolve.outputs.build_mode == 'source'
+        uses: nginxui/musl-cross-compilers@57f4de0b40cd0b53b1dc02fb8b317d87f78f3483
+        with:
+          target: aarch64-linux-musl
+          variant: richfelker/musl-cross-make
+
+      - name: Build source binaries
+        if: needs.resolve.outputs.build_mode == 'source'
+        run: |
+          scripts/build-from-source.sh \
+            source \
+            artifacts \
+            "${{ steps.musl_amd64.outputs.path }}" \
+            "${{ steps.musl_arm64.outputs.path }}"
+
+      - name: Validate binaries
+        run: |
+          set -euo pipefail
+          test -x artifacts/amd64/nginx-ui
+          test -x artifacts/arm64/nginx-ui
+          file artifacts/amd64/nginx-ui
+          file artifacts/arm64/nginx-ui
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-ui-binaries
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    needs: [resolve, lint, assets]
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.skip != 'true' &&
+      needs.lint.result == 'success' &&
+      needs.assets.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: nginx-ui-binaries
+          path: artifacts
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: needs.resolve.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and smoke test amd64
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
+          BUILD_MODE: ${{ needs.resolve.outputs.build_mode }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --build-arg "UPSTREAM_VERSION=$VERSION" \
+            --build-arg "UPSTREAM_REVISION=$REVISION" \
+            --build-arg "BUILD_MODE=$BUILD_MODE" \
+            --tag "${IMAGE}:smoke-amd64" \
+            .
+          scripts/smoke-test.sh "${IMAGE}:smoke-amd64" amd64
+
+      - name: Build and smoke test arm64
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
+          BUILD_MODE: ${{ needs.resolve.outputs.build_mode }}
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --load \
+            --build-arg "UPSTREAM_VERSION=$VERSION" \
+            --build-arg "UPSTREAM_REVISION=$REVISION" \
+            --build-arg "BUILD_MODE=$BUILD_MODE" \
+            --tag "${IMAGE}:smoke-arm64" \
+            .
+          scripts/smoke-test.sh "${IMAGE}:smoke-arm64" arm64
+
+      - name: Generate image tags
+        id: tags
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          IS_LATEST: ${{ needs.resolve.outputs.is_latest }}
+        run: |
+          tags="${IMAGE}:${VERSION}"
+          if [ "$IS_LATEST" = "true" ]; then
+            tags="${tags}"$'\n'"${IMAGE}:latest"
+          fi
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish multi-architecture image
+        id: publish
+        if: needs.resolve.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=nginx-ui-plus
+            org.opencontainers.image.description=Nginx UI on OpenResty, CI-built from upstream artifacts
+            org.opencontainers.image.source=https://github.com/alkaid-ops/nginx-ui-docker
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.revision }}
+            org.opencontainers.image.base.name=openresty/openresty:1.31.1.1-5-alpine
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            com.alkaid.nginx-ui.build-mode=${{ needs.resolve.outputs.build_mode }}
+          build-args: |
+            UPSTREAM_VERSION=${{ needs.resolve.outputs.version }}
+            UPSTREAM_REVISION=${{ needs.resolve.outputs.revision }}
+            BUILD_MODE=${{ needs.resolve.outputs.build_mode }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify published manifest
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          {
+            echo "### Published nginx-ui-plus"
+            echo ""
+            echo "- Version: \`$VERSION\`"
+            echo "- Build mode: \`${{ needs.resolve.outputs.build_mode }}\`"
+            echo "- Digest: \`$DIGEST\`"
+            echo "- Platforms: \`${{ env.PLATFORMS }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

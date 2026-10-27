@@ -1,0 +1,6 @@
+artifacts/
+source/
+dist/
+.tmp/
+*.log
+.DS_Store

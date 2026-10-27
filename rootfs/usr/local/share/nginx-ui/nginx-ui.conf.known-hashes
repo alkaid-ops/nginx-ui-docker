@@ -1,0 +1,7 @@
+# Historical SHA256 hashes of the official default conf.d/nginx-ui.conf.
+# Keep old entries so untouched files can be upgraded safely.
+# pre-fix upstream template
+6c3f1f06e242facad58e7d2cb3fd10ab1de18a70bf801c01d1b7294226b251b4  # pre-fix template
+# post-fix upstream template
+93d8357f1fc76297a11855c654cd2aaa7cc517f31afa17c7aa1041d0f5cb2882  # upstream v2.9.1 template
+007fa806e5210c763156bc35bda3acfa5630a1bff571373bbf39999b8db7021b  # current OpenResty-derived template

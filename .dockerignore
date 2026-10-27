@@ -1,0 +1,11 @@
+.git
+.github
+README.md
+THIRD_PARTY_NOTICES.md
+compose.example.yml
+source
+dist
+tests
+.tmp
+*.log
+.DS_Store

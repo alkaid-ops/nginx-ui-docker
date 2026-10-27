@@ -1,0 +1,5 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+set -eu
+
+exec nginx-ui --config /etc/nginx-ui/app.ini

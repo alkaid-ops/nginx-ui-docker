@@ -1,0 +1,10 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+set -eu
+
+if [ "${NGINX_UI_DISABLE_BUNDLED_NGINX:-}" = "true" ]; then
+    echo "Bundled OpenResty is disabled; keeping the service idle"
+    exec sleep infinity
+fi
+
+exec nginx -c /etc/nginx/nginx.conf -g 'daemon off;'
