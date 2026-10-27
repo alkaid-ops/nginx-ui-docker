@@ -62,6 +62,12 @@ init_config_main() {
         return 0
     fi
 
+    if [ -z "$(ls -A "$ETC_NGINX" 2>/dev/null)" ]; then
+        cp -a "$TEMPLATE_DIR/." "$ETC_NGINX/"
+        log INFO "Nginx configurations directory initialized"
+        return 0
+    fi
+
     mkdir -p \
         "$ETC_NGINX/conf.d" \
         "$ETC_NGINX/sites-available" \
@@ -71,12 +77,6 @@ init_config_main() {
         "$ETC_NGINX/maintenance" \
         /etc/nginx-ui \
         /var/log/nginx
-
-    if [ -z "$(ls -A "$ETC_NGINX" 2>/dev/null)" ]; then
-        cp -a "$TEMPLATE_DIR/." "$ETC_NGINX/"
-        log INFO "Nginx configurations directory initialized"
-        return 0
-    fi
 
     if [ "${NGINX_UI_PRESERVE_BUNDLED_CONF:-}" = "true" ]; then
         log INFO "NGINX_UI_PRESERVE_BUNDLED_CONF=true; skipping bundled-conf sync"
