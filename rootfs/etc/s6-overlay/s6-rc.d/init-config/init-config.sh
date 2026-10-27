@@ -62,6 +62,9 @@ init_config_main() {
         return 0
     fi
 
+    # A container restart keeps /run by default; never trust a stale master PID.
+    rm -f /var/run/nginx.pid
+
     if [ -z "$(ls -A "$ETC_NGINX" 2>/dev/null)" ]; then
         cp -a "$TEMPLATE_DIR/." "$ETC_NGINX/"
         log INFO "Nginx configurations directory initialized"

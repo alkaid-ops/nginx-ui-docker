@@ -14,6 +14,7 @@ cleanup() {
     if [ "$rc" -ne 0 ]; then
         echo "smoke test failed; container logs:" >&2
         docker logs "$container_name" >&2 || true
+        docker exec "$container_name" sh -c 'cat /var/log/nginx/error.log 2>/dev/null || true' >&2 || true
     fi
     docker rm -f "$container_name" >/dev/null 2>&1 || true
     docker volume rm -f "$nginx_volume" "$ui_volume" "$log_volume" >/dev/null 2>&1 || true
